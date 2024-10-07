@@ -278,6 +278,7 @@ public:
     std::map<int, int>              hangouts_types;
 
     // Constructor
+    City() {}
     City(LandingPad* pad, Hangout* hangout, Link* link);
     ~City() {}
 
@@ -292,11 +293,15 @@ public:
     int has_type_outflow(int type) const;
     int has_type_inflow(int type) const;
 
-    std::vector<Building *> find_closest_buildings(const Point &pad_pos, const Flow& flow) const;
-
     const Flow &get_dudes() const {
         return dudes;
     }
+
+    std::vector<Building *> find_closest_buildings(const Point &pad_pos, const Flow& flow) const;
+
+    //TODO
+    //std::tuple<Building*, Building*, int > biggest_graph_distance() const; // Return the two buildings with the biggest distance between them
+
 };
 
 
@@ -344,6 +349,7 @@ public:
 const std::vector<int> Building::empty_vector = std::vector<int>();
 
 class LandingPad : public Building {
+
 public:
     Flow dudes;
 
@@ -859,17 +865,36 @@ std::vector<Building*> get_best_drains_for_source(const City* working_city, cons
 
 bool    conect_buildings(SimModel &model, Building *b1, Building *b2, int link_type)
 {
+    if (b1->city == nullptr and b2->city == nullptr){
+        City *new_city = new City();
+        model.cities.push_back(new_city);
+        new_city->add_building(b1);
+        new_city->add_building(b2);
+    } else if (b1->city && !b2->city) {
+        b1->city->add_building(b2);
+    } else if (b2->city && !b1->city) {
+        b2->city->add_building(b1);
+    } else if (b1->city != b2->city) {
+        b1->city->merge_city(*b2->city);
+        for (const auto& city: model.cities) {
+            if (city == b2->city) {
+                model.cities.erase(std::remove(model.cities.begin(), model.cities.end(), city), model.cities.end());
+                delete city;
+                break;
+            }
+        }
+    }
+
     if (link_type == T_TUBE) {
         Tube *tube = new Tube(b1, b2);
         model.tubes[tube->id] = tube;
-        return true;
     }
     else if (link_type == T_TELE) {
         Teleporter *tele = new Teleporter(b1, b2);
         model.teleporters[tele->id] = tele;
-        return true;
     }
-    return false;
+
+    return true;
 }
 
 //////////////////////////////////////////////////
@@ -1005,6 +1030,11 @@ t_routes_and_scores make_paths(const std::vector<Link*> link_space, const t_Dude
             final_adjency_list[link->b1].push_back(link->b2);
         }
     }
+    //TODO
+    // NOTHING IS DONE RIGHT HERE BRUHHHHHH
+
+    // BRUUUUUUUUUUUUUUUUUHHHHHHHHHHHHHHHHHHHHHHHHHHH *vine boom*
+
 }
 
 std::map<t_actions, t_routes_and_scores> check_routes(SimModel &model, const t_DudeSupplyChain &supply_chain, t_actions &suggested_links)
@@ -1016,27 +1046,35 @@ std::map<t_actions, t_routes_and_scores> check_routes(SimModel &model, const t_D
     }
     ////////////////////////////////////////////////////////////////////
     // A list of all [routes + score]
-    std::map<t_actions, t_routes_and_scores> result_routes_for_links;
-    const std::vector<Link*> link_space = model.get_all_links();
+    std::map<t_actions, t_routes_and_scores>    result_routes_for_links;
+    t_actions                                   actions_for_these_links;
     ////////////////////////////////////////////////////////////////////
-    t_actions actions_for_these_links;
+    // TODO: Finds a better way to combine ALL possible links, and not just pairs
 
-
-    ////////////////////////////////////////////////////////////////////
-    std::vector<Link*> theory_links;
-    for (const auto &[b1, b2, link_type] : actions_for_these_links) {
-        if (link_type == T_TUBE) {
-            theory_links.push_back(new Tube(b1, b2));
-        } else {
-            theory_links.push_back(new Teleporter(b1, b2));
+    int n = suggested_links.size();
+    for (int mask = 0; mask < n; mask++)
+    {
+        actions_for_these_links.clear();
+        for (int j = 0; j < n; j++) {
+            if (mask & (1 << j))
+                actions_for_these_links.push_back(suggested_links[j]);
         }
+
+        std::vector<Link*>  theory_links;
+        for (const auto &[b1, b2, link_type] : actions_for_these_links) {
+            if (link_type == T_TUBE) {
+                theory_links.push_back(new Tube(b1, b2));
+            } else {
+                theory_links.push_back(new Teleporter(b1, b2));
+            }
+        }
+        std::vector<Link*> sub_space = model.get_all_links();
+        for (const auto &link: theory_links) {
+            sub_space.push_back(link);
+        }
+        result_routes_for_links[actions_for_these_links] = (make_paths(sub_space, supply_chain, model.resources));
+        for (const auto &link : theory_links) delete link;
     }
-    std::vector<Link*> sub_space = link_space;
-    for (const auto &link: theory_links) {
-        sub_space.push_back(link);
-    }
-    result_routes_for_links[actions_for_these_links] = (make_paths(link_space, supply_chain, model.resources));
-    for (const auto &link : theory_links) delete link;
 
     return result_routes_for_links;
 }
@@ -1056,6 +1094,7 @@ void apply_best_routes(SimModel &model, std::map<t_actions, t_routes_and_scores>
             best_actions = &actions;
         }
     }
+
     for (const auto &[b1, b2, link_type] : *best_actions) {
         if (link_type == T_TUBE) {
             print_action_tube(b1->id, b2->id);
@@ -1063,6 +1102,14 @@ void apply_best_routes(SimModel &model, std::map<t_actions, t_routes_and_scores>
         } else {
             print_action_teleport(b1->id, b2->id);
             conect_buildings(model, b1, b2, T_TELE);
+        }
+    }
+    t_routes_and_scores actions_score = result_routes_for_links[*best_actions];
+    for (const auto &[route_score, routes] : actions_score) {
+        for (const auto &[building_id, route] : routes) {
+            Pod *pod = new Pod(route);
+            model.pods[pod->id] = pod;
+            print_action_pod(pod->id, route);
         }
     }
 }
