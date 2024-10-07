@@ -870,10 +870,27 @@ bool    conect_buildings(SimModel &model, Building *b1, Building *b2, int link_t
         model.cities.push_back(new_city);
         new_city->add_building(b1);
         new_city->add_building(b2);
+        if (b1->building_class == BuildingClass::PAD)
+            model.isolated_pads.erase(b1->id);
+        else
+            model.isolated_hangouts.erase(b1->id);
+        if (b2->building_class == BuildingClass::PAD)
+            model.isolated_pads.erase(b2->id);
+        else
+            model.isolated_hangouts.erase(b2->id);
+
     } else if (b1->city && !b2->city) {
         b1->city->add_building(b2);
+        if (b2->building_class == BuildingClass::PAD)
+            model.isolated_pads.erase(b2->id);
+        else
+            model.isolated_hangouts.erase(b2->id);
     } else if (b2->city && !b1->city) {
         b2->city->add_building(b1);
+        if (b1->building_class == BuildingClass::PAD)
+            model.isolated_pads.erase(b1->id);
+        else
+            model.isolated_hangouts.erase(b1->id);
     } else if (b1->city != b2->city) {
         b1->city->merge_city(*b2->city);
         for (const auto& city: model.cities) {
@@ -1034,7 +1051,7 @@ t_routes_and_scores make_paths(const std::vector<Link*> link_space, const t_Dude
     // NOTHING IS DONE RIGHT HERE BRUHHHHHH
 
     // BRUUUUUUUUUUUUUUUUUHHHHHHHHHHHHHHHHHHHHHHHHHHH *vine boom*
-
+    
 }
 
 std::map<t_actions, t_routes_and_scores> check_routes(SimModel &model, const t_DudeSupplyChain &supply_chain, t_actions &suggested_links)
@@ -1105,12 +1122,10 @@ void apply_best_routes(SimModel &model, std::map<t_actions, t_routes_and_scores>
         }
     }
     t_routes_and_scores actions_score = result_routes_for_links[*best_actions];
-    for (const auto &[route_score, routes] : actions_score) {
-        for (const auto &[building_id, route] : routes) {
-            Pod *pod = new Pod(route);
-            model.pods[pod->id] = pod;
-            print_action_pod(pod->id, route);
-        }
+    for (const auto &pair : actions_score) {
+        Pod *pod = new Pod(pair.second);
+        model.pods[pod->id] = pod;
+        print_action_pod(pod->id, pair.second);
     }
 }
 
