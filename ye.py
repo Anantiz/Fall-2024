@@ -502,6 +502,12 @@ def tube_is_valid(b1, b2, model: SimModel) -> bool:
             return False
     return True
 
+def teleporter_is_valid(b1, b2) -> bool:
+    if b1.tp_state != TeleporterState.Frei or b2.tp_state != TeleporterState.Frei or b1 is b2:
+        return False
+    return True
+
+
 def link_tube(b1, b2, model, dist=None):
     """
     Create a tube between two buildings
@@ -908,4 +914,3 @@ while True:
 
     log(f"Time: {int((time.time() - start_time) * 1000)} ms")
     close_round()
-

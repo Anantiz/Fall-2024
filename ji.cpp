@@ -32,6 +32,7 @@
 #define T_TELE 2
 #define T_CITY 3
 #define T_PODS 4
+#define T_IMPOSSIBLE -1
 
 class SimModel;
 class City;
@@ -44,6 +45,15 @@ class Link;
 class Pod;
 class Tube;
 class Teleporter;
+class Flow;
+
+typedef std::vector<std::tuple<City*, LandingPad*, Flow> > t_sources;
+typedef std::vector<std::tuple<City*, Hangout*, Flow> >  t_drains;
+
+// Pair: [Sources:(City or Pad)], [Drains:(City or Hangout)]
+typedef std::pair<t_sources, t_drains> t_DudeSupplyChain;
+typedef std::vector<std::tuple<Building*, Building*, int> > t_actions;
+typedef std::vector<int> t_route;
 
 // ██    ██ ████████ ██ ██      ███████
 // ██    ██    ██    ██ ██      ██
@@ -62,7 +72,7 @@ class Flow
      */
 public:
 
-    std::map<float, float>    data;
+    std::map<int, float>    data;
 
     Flow() {}
 
@@ -154,6 +164,10 @@ public:
             }
         }
         return overflow;
+    }
+
+    bool has_type(int type) const {
+        return data.find(type) != data.end();
     }
 };
 
@@ -277,6 +291,12 @@ public:
 
     int has_type_outflow(int type) const;
     int has_type_inflow(int type) const;
+
+    std::vector<Building *> find_closest_buildings(const Point &pad_pos, const Flow& flow) const;
+
+    const Flow &get_dudes() const {
+        return dudes;
+    }
 };
 
 
@@ -368,11 +388,11 @@ public:
     int         id;
     int         capacity;
     // Pointers to Buildings
-    Building*   b1;
-    Building*   b2;
+    const Building*   b1;
+    const Building*   b2;
     City*       city;
 
-    Link(Building* b1, Building* b2, int id, int capacity)
+    Link(const Building* b1, const Building * b2, int id, int capacity)
     : b1(b1), b2(b2), id(id), capacity(capacity) {
         city = b1->city;  // Assuming b1 and b2 belong to the same city
     }
@@ -384,13 +404,14 @@ public:
         capacity += 1;
         return true;
     }
+
 };
 
 class Tube : public Link {
     static int tube_id_gen;
 public:
 
-    Tube(Building* b1, Building* b2)
+    Tube(const Building* b1, const Building* b2)
     : Link(b1, b2, tube_id_gen++, 1) {
 
     }
@@ -402,10 +423,10 @@ class Teleporter : public Link {
     static int tp_id_gen;
 public:
 
-    Teleporter(Building* b1, Building* b2)
-    : Link(b1, b2, tp_id_gen++, 0) {
-        b1->tp_state = TeleporterState::Eingang;  // Assuming enum exists
-        b2->tp_state = TeleporterState::Ausgang;
+    // tp have negative id
+    Teleporter(const Building* b1, const Building* b2)
+    : Link(b1, b2, -tp_id_gen++, 0) {
+
     }
 };
 
@@ -415,12 +436,15 @@ class Pod {
 private:
     static int pod_id_gen;
 public:
-    int id;
-    Pod() : id(pod_id_gen) {pod_id_gen++;}
+    const int id;
+    const t_route route;
+
+    Pod(t_route route) : id(pod_id_gen), route(route) {
+        pod_id_gen++;
+    }
 };
 
 int Pod::pod_id_gen = 0;
-
 
 //  ██████ ██ ████████ ██    ██
 // ██      ██    ██     ██  ██
@@ -536,6 +560,40 @@ int City::has_type_outflow(int type) const {
 
 int City::has_type_inflow(int type) const {
     return dudes.get_type_count(type);
+}
+
+std::vector<Building *> City::find_closest_buildings(const Point &pad_pos, const Flow& flow) const
+{
+    std::vector<Building *> result;
+
+    Hangout *closest_matching_hangout = nullptr;
+    double closest_matching_distance = std::numeric_limits<double>::max();
+
+    Building *closest_universal = nullptr;
+    double closest_universal_distance = std::numeric_limits<double>::max();
+
+    for (const auto& [id, hangout]: hangouts) {
+        double distance = pad_pos.distance(hangout->get_pos());
+        if (flow.has_type(hangout->type)) {
+            if (distance < closest_matching_distance) {
+                closest_matching_distance = distance;
+                closest_matching_hangout = hangout;
+            }
+        }
+        if (distance < closest_universal_distance) {
+            closest_universal_distance = distance;
+            closest_universal = hangout;
+        }
+    }
+
+    for (const auto& [id, hangout]: hangouts) {
+        double distance = pad_pos.distance(hangout->get_pos());
+        if (distance < closest_universal_distance) {
+            closest_universal_distance = distance;
+            closest_universal = hangout;
+        }
+    }
+    return {closest_matching_hangout, closest_universal};
 }
 
 // ███    ███  ██████  ██████  ███████ ██
@@ -676,22 +734,151 @@ public:
             log("Billed: " + std::to_string(amount) + ", Remaining: " + std::to_string(resources) + ", " + msg);
         }
     }
+
+    std::vector<Link *>    get_all_links() const {
+        std::vector<Link *> links;
+        for (const auto& [id, tube]: tubes) {
+            links.push_back(tube);
+        }
+        for (const auto& [id, tele]: teleporters) {
+            links.push_back(tele);
+        }
+        return links;
+    }
 };
 
-// ██████  ██    ██ ████████ ██   ██ ███    ███
-// ██   ██  ██  ██     ██    ██   ██ ████  ████
-// ██████    ████      ██    ███████ ██ ████ ██
-// ██   ██    ██       ██    ██   ██ ██  ██  ██
-// ██   ██    ██       ██    ██   ██ ██      ██
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+bool teleporter_isvalid(Building *b1, Building *b2) {
+    if (b1 == b2)
+        return false;
+    if (b1 == nullptr || b2 == nullptr)
+        return false;
+    if (b1->tp_state != TeleporterState::Frei || b2->tp_state != TeleporterState::Frei)
+        return false;
+    return true;
+}
+
+bool will_overlap_building(const Point& start, const Point& end, const Point& other) {
+    if (std::abs(start.distance(end) - (start.distance(other) + other.distance(end))) < EPSILON)
+        return true;
+    return false;
+}
+
+bool will_overlap_tube(const Point& start, const Point& end, const Point& other_start, const Point& other_end) {
+    Point vec_a = end - start;
+    Point vec_b = other_end - other_start;
+    double t = ((other_start.x - start.x) * vec_b.y - (other_start.y - start.y) * vec_b.x) / (vec_a.x * vec_b.y - vec_a.y * vec_b.x + EPSILON);
+    if (t < 0 || t > 1)
+        return false;
+    return true;
+}
+
+bool tube_isvalid(Building *b1, Building *b2, SimModel &model) {
+    if (b1 == b2)
+        return false;
+    if (b1 == nullptr || b2 == nullptr)
+        return false;
+
+    const Point &pos1 = b1->get_pos();
+    const Point &pos2 = b2->get_pos();
+    // Tube overlap ?
+    for (const auto &[id, tube]: model.tubes) {
+        if (will_overlap_tube(pos1, pos2, tube->b1->get_pos(), tube->b2->get_pos()))
+            return false;
+    }
+    // Building overlap ?
+    for (const auto &[id, building]: model.buildings) {
+        if (id == b1->id || id == b2->id)
+            continue;
+        if (will_overlap_building(pos1, pos2, building->get_pos()))
+            return false;
+    }
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+// O(n**2)
+void magic_1(std::vector<Building*> &best_conections_to_drain, const t_drains &all_drains, const Point &pos, const Flow &src_flow, const void* skip)
+{
+    std::vector<Building *> best_ones;
+    for (const auto& [drain_city, drain_hangout, flow] : all_drains) {
+        if (skip != nullptr and skip == drain_city)
+            continue;
+        if (drain_city) {
+            best_ones = drain_city->find_closest_buildings(pos, src_flow);
+            for (auto building : best_ones) {
+                if (building != nullptr)
+                    best_conections_to_drain.push_back(building);
+            }
+        }
+        else { // If the drain is a hangout
+            if (flow.has_type(drain_hangout->type)) {
+                best_conections_to_drain.push_back(drain_hangout);
+                log("Hangout matching: " + std::to_string(drain_hangout->id) + " Sourceflow: " + src_flow.to_string());
+            }
+            else {
+                log("Hangout not matching: " + std::to_string(drain_hangout->id) + " Sourceflow: " + src_flow.to_string());
+            }
+        }
+    }
+}
+
+// O(n**2) that calls magic_1 which is O(n**2) too so O(n**4) Awesome, loving Np-hard
+std::vector<Building*> get_best_drains_for_source(const City* working_city, const LandingPad* working_pad, const t_drains &all_drains) {
+
+    std::vector<Building*> best_conections_to_drain;
+    std::map<int, int> dudes_types;
+
+    if (working_pad != nullptr) // If we want to add drain to an pad
+    {
+        const Flow &src_flow = working_pad->get_dudes();
+        const Point &pad_pos = working_pad->get_pos();
+        magic_1(best_conections_to_drain, all_drains, pad_pos, src_flow, nullptr);
+    }
+    else // If we want to add more drains to a city
+    {
+        // THAT IS LIKE, exponentially more complex to compute optimally, so we go with a sub-optimal solution
+        const Flow &src_flow = working_city->get_dudes();
+        // Actually who cares it's cpp
+        for (const auto &pad: working_city->landing_pads){
+            magic_1(best_conections_to_drain, all_drains, pad.second->get_pos(), src_flow, working_city);
+        }
+    }
+    return best_conections_to_drain;
+}
 
 
-typedef std::vector<std::tuple<City*, LandingPad*, Flow> > t_sources;
-typedef std::vector< std::tuple<City*, Hangout*, Flow> >  t_drains;
+bool    conect_buildings(SimModel &model, Building *b1, Building *b2, int link_type)
+{
+    if (link_type == T_TUBE) {
+        Tube *tube = new Tube(b1, b2);
+        model.tubes[tube->id] = tube;
+        return true;
+    }
+    else if (link_type == T_TELE) {
+        Teleporter *tele = new Teleporter(b1, b2);
+        model.teleporters[tele->id] = tele;
+        return true;
+    }
+    return false;
+}
 
-// Pair: [Sources:(City or Pad)], [Drains:(City or Hangout)]
-typedef std::pair<t_sources, t_drains> t_DudeSupplyChain;
-typedef std::vector<std::tuple<int, int, int> > t_actions;
-typedef std::vector<int> t_route;
+//////////////////////////////////////////////////
+// ██████  ██    ██ ████████ ██   ██ ███    ███ //
+// ██   ██  ██  ██     ██    ██   ██ ████  ████ //
+// ██████    ████      ██    ███████ ██ ████ ██ //
+// ██   ██    ██       ██    ██   ██ ██  ██  ██ //
+// ██   ██    ██       ██    ██   ██ ██      ██ //
+//////////////////////////////////////////////////
 
 
 /**
@@ -705,6 +892,7 @@ typedef std::vector<int> t_route;
 t_DudeSupplyChain check_dude_supply_chain(SimModel &model)
 {
     t_DudeSupplyChain supply_chain;
+
     t_sources &sources = supply_chain.first;
     t_drains &drains = supply_chain.second;
 
@@ -723,60 +911,160 @@ t_DudeSupplyChain check_dude_supply_chain(SimModel &model)
         drains.push_back(std::make_tuple(nullptr, \
         dynamic_cast<Hangout*>(model.buildings[id]), Flow(model.buildings[id]->type)));
     }
+
+    log("Supply chain: drains: " + std::to_string(supply_chain.second.size()) + ", sources: " + std::to_string(supply_chain.first.size()));
+
     return supply_chain;
 }
 
 t_actions    suggest_links_for_supply_chain(SimModel &model, t_DudeSupplyChain &supply_chain)
-/*
-Takes the supply chain and suggest new links in order of priority
-The links that will balance the flow the most will be the first to be suggested
-*/
 {
     /*
+    Takes the supply chain and suggest new links in order of priority
+    The links that will balance the flow the most will be the first to be suggested
     Layer 1: Identify "critical" links that should be built independently. These are the most obvious supply-demand connections that are clearly necessary.
     Layer 2: Once critical links are made, identify dependent links that only make sense after the first layer has been established.
     Layer 3: For each dependent link, evaluate whether its impact justifies the cost and complexity.
     */
+    t_sources &sources = supply_chain.first;
+    t_drains &drains = supply_chain.second;
+    t_actions available_new_links; // building_id1, building_id2, link_type(T_TUBE or T_TELE)
+    //TO-DO: Later, find the longest distance between a source and drain in the same city and connect them
 
-    // building_id1, building_id2, link_type(T_TUBE or T_TELE)
-    t_actions available_new_links;
+    for (const auto &[city, pad, flow] : sources) {
+        if (pad != nullptr) {
+            std::vector<Building *> all_building_that_can_drain = get_best_drains_for_source(nullptr, pad, drains);
+            if (all_building_that_can_drain.empty()) {
+                log("No building can drain from pad: " + std::to_string(pad->id));
+                continue;
+            }
 
-    /*
-        loop:
-            find_largest_source:
-                find_all_fitting_drains
-                for_fitting_drains_sort_by_balance (Stray hanoguts will bring more balance than a city which already has src/drain)
-            redo_with_next_largest_source
-
-        loop:
-            for_each_city:
-                check_sources_with_no_drains
-                match_the_best_drains (might be an other city, or a stray hangout)
-
-        TO-DO: Later, find the longest distance between a source and drain in the same city and connect them
-    */
-
+            for (auto drain_building : all_building_that_can_drain) {
+                if (tube_isvalid(pad, drain_building, model))
+                    available_new_links.push_back({pad, drain_building, T_TUBE});
+                else {log("Tube not valid: " + std::to_string(pad->id) + " " + std::to_string(drain_building->id));}
+                if (teleporter_isvalid(pad, drain_building))
+                    available_new_links.push_back({pad, drain_building, T_TELE});
+                else {log("Teleporter not valid: " + std::to_string(pad->id) + " " + std::to_string(drain_building->id));}
+            }
+        } else {
+            std::vector<Building *> all_building_that_can_drain = get_best_drains_for_source(city, nullptr, drains);
+            if (all_building_that_can_drain.empty()) {
+                log("No building can drain from city");
+                continue;
+            }
+            // Work backwards to avoid exponential complexity: For every building that can drain, find a way to reach the city
+            for (auto drain_building : all_building_that_can_drain) {
+                bool ok = false;
+                for (auto &[id, pad]: city->landing_pads) {
+                    if (ok) break;
+                    if (tube_isvalid(pad, drain_building, model)) {
+                        available_new_links.push_back({pad, drain_building, T_TUBE}); ok = true;
+                    } else {log("Tube not valid: " + std::to_string(pad->id) + " " + std::to_string(drain_building->id));}
+                    if (teleporter_isvalid(pad, drain_building)) {
+                        available_new_links.push_back({pad, drain_building, T_TELE}); ok = true;
+                    }else {log("Teleporter not valid: " + std::to_string(pad->id) + " " + std::to_string(drain_building->id));}
+                }
+                for (auto &[id, hangout]: city->hangouts) {
+                    if (ok) break;
+                    if (tube_isvalid(hangout, drain_building, model)) {
+                        available_new_links.push_back({hangout, drain_building, T_TUBE}); ok = true;
+                    }
+                    if (teleporter_isvalid(hangout, drain_building)) {
+                        available_new_links.push_back({hangout, drain_building, T_TELE}); ok = true;
+                    }
+                }
+            }
+        }
+    }
     return available_new_links;
 }
+////////////////////////////////////////////////////////////////////////////////
 
-std::vector<std::pair<t_route, t_actions> > check_routes(SimModel &model, t_DudeSupplyChain &supply_chain, t_actions &suggested_links)
+typedef std::vector<std::pair<int, t_route> > t_routes_and_scores;
+
 /*
-Considering any links that could be built, and existing links, defines the best routes for the dudes
+    Find the best combinaison of routes using the available links
+
+    Returns (score, routes)
 */
+t_routes_and_scores make_paths(const std::vector<Link*> link_space, const t_DudeSupplyChain &supply_chain, int budget)
 {
-    // [ pair([route], links_required), ... ]
-    std::vector<std::pair<t_route, t_actions> > \
-    new_routes_if_links_are_built;
+    // This is what the final graph will look like with the routes
+    std::map<const Building*, std::vector<const Building*> > final_adjency_list;
+    // This is what can be used
+    std::map<const Building*, std::vector<const Building*> > tube_links_per_building;
+    // std::map<const Building*, std::vector<const Building*> > teleporter_links_per_building; // No use ?
 
-
-    return new_routes_if_links_are_built;
+    for (const auto &link: link_space) {
+        if (link->id >= 0) {
+            tube_links_per_building[link->b1].push_back(link->b2);
+        }
+        else {
+            // teleporter_links_per_building[link->b1].push_back(link->b2);
+            final_adjency_list[link->b1].push_back(link->b2);
+        }
+    }
 }
 
-void do_best_decision(SimModel &model, std::vector<std::pair<t_route, t_actions> > &potential_new_routes)
+std::map<t_actions, t_routes_and_scores> check_routes(SimModel &model, const t_DudeSupplyChain &supply_chain, t_actions &suggested_links)
 {
-    (void) model;
-    (void) potential_new_routes;
-    // For all routes, takes the one that do not interfere, and keep them in budget
+    // Cuz i don't know what my code did: Log the suggested links
+    if (suggested_links.size() == 0) log("No suggested links");
+    for (const auto &[b1, b2, link_type] : suggested_links) {
+        log("Suggested link: " + std::to_string(b1->id) + " " + std::to_string(b2->id) + (link_type == T_TUBE ? " TUBE" : " TP"));
+    }
+    ////////////////////////////////////////////////////////////////////
+    // A list of all [routes + score]
+    std::map<t_actions, t_routes_and_scores> result_routes_for_links;
+    const std::vector<Link*> link_space = model.get_all_links();
+    ////////////////////////////////////////////////////////////////////
+    t_actions actions_for_these_links;
+
+
+    ////////////////////////////////////////////////////////////////////
+    std::vector<Link*> theory_links;
+    for (const auto &[b1, b2, link_type] : actions_for_these_links) {
+        if (link_type == T_TUBE) {
+            theory_links.push_back(new Tube(b1, b2));
+        } else {
+            theory_links.push_back(new Teleporter(b1, b2));
+        }
+    }
+    std::vector<Link*> sub_space = link_space;
+    for (const auto &link: theory_links) {
+        sub_space.push_back(link);
+    }
+    result_routes_for_links[actions_for_these_links] = (make_paths(link_space, supply_chain, model.resources));
+    for (const auto &link : theory_links) delete link;
+
+    return result_routes_for_links;
+}
+
+void apply_best_routes(SimModel &model, std::map<t_actions, t_routes_and_scores> &result_routes_for_links)
+{
+    const t_actions *best_actions = nullptr;
+    int best_score = 0;
+
+    for (const auto &[actions, routes_and_scores] : result_routes_for_links) {
+        int added_scores = 0;
+        for (const auto &[route_score, routes] : routes_and_scores) {
+            added_scores += route_score;
+        }
+        if (added_scores > best_score) {
+            best_score = added_scores;
+            best_actions = &actions;
+        }
+    }
+    for (const auto &[b1, b2, link_type] : *best_actions) {
+        if (link_type == T_TUBE) {
+            print_action_tube(b1->id, b2->id);
+            conect_buildings(model, b1, b2, T_TUBE);
+        } else {
+            print_action_teleport(b1->id, b2->id);
+            conect_buildings(model, b1, b2, T_TELE);
+        }
+    }
 }
 
 /**
@@ -786,15 +1074,16 @@ void do_best_decision(SimModel &model, std::vector<std::pair<t_route, t_actions>
  *
  * */
 void semi_optimal_algorithm(SimModel& model)
-/*
-First, check if there are isolated hangouts or pads.
+{
+    /*
+    First, check if there are isolated hangouts or pads.
     If there are, check how you would connect them if you had to
     (Store this different conections in a vector) vec<b1, b2, link_type>
-Then, for every two cities:
+    Then, for every two cities:
     check if there is an over-supply of dudes in one city as compared to the other
     (Take the type of the dudes into account, otherwise this step is useless)
     Then have again a vector of actions vec<b1, b2, link_type
-Lastly: Most Critical part to get right
+    Lastly: Most Critical part to get right
     Have a Route manager, it is an algorithm that will:
         - Consider the supply of dudes in each city, and for each pad (source of dudes)
         - Consider the current existing network of links (tubes and teleporters) and how these dudes could best flow in the network
@@ -808,13 +1097,11 @@ Lastly: Most Critical part to get right
         - Pods can be moved around (Destroy+Rebuild) for a cost of 250, this is crucial to consider because:
             - New links will need to have pods serving them, and pods are like, expensive, so a pod should be used as much as possible
             - But not too much otherwise it will be too slow, and dudes give less score if it takes too long to reach their destination
-*/
-{
+    */
     auto dude_supply_chain = check_dude_supply_chain(model);
     auto suggested_links = suggest_links_for_supply_chain(model, dude_supply_chain);
-    auto potential_new_routes = check_routes(model, dude_supply_chain, suggested_links);;
-
-    do_best_decision(model, potential_new_routes);
+    auto result_routes_for_links = check_routes(model, dude_supply_chain, suggested_links);;
+    apply_best_routes(model, result_routes_for_links);
 }
 
 
